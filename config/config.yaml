@@ -1,0 +1,192 @@
+version: 1
+
+server:
+  listen: "0.0.0.0:8080"
+  admin_listen: "127.0.0.1:9090"
+  max_body_bytes: 2000000
+  request_timeout_ms: 950
+  max_inflight: 4096
+  heavy_text_threshold_bytes: 65536
+
+security:
+  master_key: "env:PDG_MASTER_KEY"
+  admin_token_sha256: "env:PDG_ADMIN_TOKEN_SHA256"
+  auth_header: "X-System-Key"
+  system_id_header: "X-System-Id"
+
+logging:
+  level: info
+  format: json
+  log_entity_offsets: true
+
+vault:
+  mode: memory
+  ttl_seconds: 900
+  max_entries: 1000000
+  redis_url: "env:PDG_REDIS_URL"
+  delete_after_demask: false
+
+ner:
+  engine: disabled
+  onnx:
+    model_path: "/models/ner.onnx"
+    tokenizer_path: "/models/tokenizer.json"
+    workers: 4
+    max_batch: 16
+    batch_wait_ms: 5
+  http:
+    url: "http://ner:8000/ner"
+    timeout_ms: 300
+  timeout_ms: 400
+  max_windows_per_request: 64
+  trigger_words: ["клиент", "зовут", "проживает", "уроженец", "гражданин", "заявитель"]
+  circuit_breaker: { failure_ratio: 0.5, window: 20, open_seconds: 10 }
+
+resources:
+  first_names: "config/resources/first_names.txt"
+  public_persons: "config/resources/public_persons.txt"
+  bank_offices: "config/resources/bank_offices.txt"
+  bank_phones: "config/resources/bank_phones.txt"
+  countries: "config/resources/countries.txt"
+  cities: "config/resources/cities.txt"
+  issuing_authorities: "config/resources/issuing_authorities.txt"
+
+pd_types:
+  FIO:            { label: "ФИО",       priority: 50,  threshold: 0.7 }
+  BIRTH_DATE:     { label: "ДАТА_РОЖД", priority: 70,  threshold: 0.6 }
+  BIRTH_PLACE:    { label: "МЕСТО_РОЖД", priority: 55, threshold: 0.6 }
+  PASSPORT:       { label: "ПАСПОРТ",   priority: 90,  threshold: 0.6 }
+  CITIZENSHIP:    { label: "ГРАЖДАНСТВО", priority: 45, threshold: 0.6 }
+  PASSPORT_ISSUER: { label: "ОРГАН",    priority: 55,  threshold: 0.6 }
+  DIVISION_CODE:  { label: "КОД_ПОДР",  priority: 75,  threshold: 0.6 }
+  PASSPORT_ISSUE_DATE: { label: "ДАТА_ВЫД", priority: 70, threshold: 0.6 }
+  DRIVER_LICENSE: { label: "ВУ",        priority: 85,  threshold: 0.6 }
+  ADDRESS:        { label: "АДРЕС",     priority: 60,  threshold: 0.6 }
+  ADDR_COUNTRY:   { label: "СТРАНА",    priority: 45,  threshold: 0.6 }
+  ADDR_INDEX:     { label: "ИНДЕКС",    priority: 45,  threshold: 0.6 }
+  ADDR_REGION:    { label: "РЕГИОН",    priority: 45,  threshold: 0.6 }
+  ADDR_CITY:      { label: "ГОРОД",     priority: 45,  threshold: 0.6 }
+  ADDR_STREET:    { label: "УЛИЦА",     priority: 45,  threshold: 0.6 }
+  ADDR_HOUSE:     { label: "ДОМ",       priority: 45,  threshold: 0.6 }
+  ADDR_FLAT:      { label: "КВ",        priority: 45,  threshold: 0.6 }
+  EMAIL:          { label: "EMAIL",     priority: 80,  threshold: 0.6 }
+  PHONE:          { label: "ТЕЛЕФОН",   priority: 80,  threshold: 0.6 }
+  INN:            { label: "ИНН",       priority: 95,  threshold: 0.6 }
+  CARD_NUMBER:    { label: "КАРТА",     priority: 100, threshold: 0.7 }
+  CVV:            { label: "CVV",       priority: 40,  threshold: 0.6 }
+  PIN:            { label: "ПИН",       priority: 40,  threshold: 0.6 }
+  CARD_HOLDER:    { label: "ДЕРЖАТЕЛЬ", priority: 52,  threshold: 0.6 }
+  SNILS:          { label: "СНИЛС",     priority: 90,  threshold: 0.6 }
+  FOREIGN_PASSPORT: { label: "ЗАГРАН",  priority: 85,  threshold: 0.6 }
+  OMS_POLICY:     { label: "ПОЛИС",     priority: 85,  threshold: 0.6 }
+  BIRTH_CERT:     { label: "СВИД_РОЖД", priority: 85,  threshold: 0.6 }
+  MILITARY_ID:    { label: "ВОЕН_БИЛЕТ", priority: 85, threshold: 0.6 }
+  DATE:           { label: "ДАТА",      priority: 10,  threshold: 0.6 }
+  ORG_INN:        { label: "ИНН_ОРГ",   priority: 95,  threshold: 0.6 }
+  UNCLASSIFIED_ID: { label: "ID",       priority: 5,   threshold: 0.6 }
+
+profiles:
+  strict:
+    types:
+      FIO:             { mask: placeholder }
+      BIRTH_DATE:      { mask: placeholder }
+      BIRTH_PLACE:     { mask: placeholder }
+      PASSPORT:        { mask: placeholder }
+      PASSPORT_ISSUER: { mask: placeholder }
+      DIVISION_CODE:   { mask: placeholder }
+      PASSPORT_ISSUE_DATE: { mask: placeholder }
+      CITIZENSHIP:     { mask: placeholder }
+      DRIVER_LICENSE:  { mask: placeholder }
+      ADDRESS:         { mask: placeholder, mode: components }
+      EMAIL:           { mask: placeholder }
+      PHONE:           { mask: placeholder }
+      INN:             { mask: placeholder }
+      CARD_NUMBER:     { mask: partial, keep_last: 4 }
+      CVV:             { mask: redact }
+      PIN:             { mask: redact }
+      CARD_HOLDER:     { mask: placeholder }
+      SNILS:           { mask: placeholder }
+    ner: { enabled: false, types: [FIO, BIRTH_PLACE, ADDRESS], on_failure: degrade }
+    filters: [public_persons, bank_allowlist, org_context, negative_number_context]
+    combination:
+      rules:
+        PIN: { requires_any: [CARD_NUMBER], scope: document }
+        CVV: { requires_any: [CARD_NUMBER], scope: window, window_chars: 200 }
+      min_distinct_types: 1
+      always_mask: [CARD_NUMBER, PASSPORT, INN]
+    ambiguous_ids: mask
+    demask: true
+
+  cards_only:
+    types:
+      CARD_NUMBER: { mask: token }
+      CVV:         { mask: redact }
+      PIN:         { mask: redact }
+      CARD_HOLDER: { mask: synthetic }
+    ner: { enabled: false }
+    filters: [bank_allowlist]
+    demask: true
+
+defaults:
+  profile: strict
+  placeholder: { format: "[{label}_{n}]" }
+  action: mask
+
+systems:
+  crm-assistant:
+    enabled: true
+    key_sha256: "env:PDG_KEY_CRM_SHA256"
+    profile: strict
+    demask: true
+    rate_limit_rps: 500
+  payments-bot:
+    enabled: true
+    key_sha256: "env:PDG_KEY_PAY_SHA256"
+    profile: cards_only
+    demask: true
+    overrides:
+      types:
+        PHONE: { mask: partial }
+        PIN:   { disabled: true }
+      combination:
+        rules:
+          PIN: null
+  analytics:
+    enabled: false
+    key_sha256: "env:PDG_KEY_ANALYTICS_SHA256"
+    profile: strict
+
+upstreams:
+  llm-main:
+    url: "https://llm.internal.bank/v1"
+    auth_header: "Authorization"
+    auth_value: "env:PDG_LLM_TOKEN"
+    timeout_ms: 60000
+    pass_headers: ["content-type", "accept"]
+
+routes:
+  - id: chat
+    match: { method: POST, path: "/v1/chat/completions" }
+    upstream: llm-main
+    request:
+      json_paths: ["$.messages[*].content", "$.messages[*].content[*].text"]
+    response:
+      demask: true
+      json_paths: ["$.choices[*].message.content"]
+    stream: forbid
+
+  - id: embeddings
+    match: { method: POST, path: "/v1/embeddings" }
+    upstream: llm-main
+    request:
+      json_paths: ["$.input", "$.input[*]"]
+    response: { demask: false }
+
+  - id: models
+    match: { method: GET, path: "/v1/models" }
+    upstream: llm-main
+    action: bypass
+
+  - id: files
+    match: { method: POST, path_prefix: "/v1/files" }
+    action: block
