@@ -4,13 +4,16 @@ WORKDIR /build
 
 # Кэширование зависимостей.
 COPY Cargo.toml Cargo.lock ./
-RUN mkdir -p src && echo "fn main() {}" > src/main.rs && echo "" > src/lib.rs \
+RUN mkdir -p src benches && echo "fn main() {}" > src/main.rs && echo "" > src/lib.rs \
+    && echo "fn main() {}" > benches/detection.rs \
     && cargo build --release 2>/dev/null || true
 
 # Полная сборка.
+COPY benches ./benches
 COPY src ./src
 COPY config ./config
-RUN cargo build --release
+# touch: иначе cargo сочтёт заглушки из кэш-слоя свежее исходников.
+RUN touch src/main.rs src/lib.rs && cargo build --release
 
 # ---- Runtime stage (distroless, non-root) ----
 FROM gcr.io/distroless/cc-debian12:nonroot
