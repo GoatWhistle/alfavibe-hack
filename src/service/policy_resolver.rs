@@ -31,6 +31,10 @@ impl PolicyResolver {
         route_id: Option<&str>,
     ) -> Result<Arc<EffectivePolicy>, PolicyError> {
         let cfg = self.cfg.load_full();
+        // PERF-05: берём из предвычисленного кэша.
+        if let Some(p) = cfg.policies.get(&(system_id.to_string(), route_id.map(|s| s.to_string()))) {
+            return Ok(p.clone());
+        }
         resolve_policy(&cfg, system_id, route_id)
     }
 }

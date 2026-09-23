@@ -7,7 +7,7 @@ use crate::domain::entity::{Candidate, DetectorSource, SignalFlags};
 use crate::domain::pd_type::PdType;
 use crate::domain::traits::{DetectCtx, Detector};
 
-use super::context::{is_boundary, window};
+use super::context::{has_any_word, has_word, is_boundary, window};
 
 pub struct AddressDetector {
     re_index: Regex,
@@ -29,9 +29,12 @@ impl AddressDetector {
     pub fn new() -> Self {
         Self {
             re_index: Regex::new(r"\d{6}").unwrap(),
-            re_region: Regex::new(r"(\w+\s+)?(обл(асть|\.)?|край|респ(ублика|\.)?|ао|автономный округ)|республика \w+").unwrap(),
-            re_city: Regex::new(r"(г\.|город|пгт|пос\.|поселок|с\.|село|дер\.|деревня)\s*[\w-]+(\s[\w-]+)?").unwrap(),
-            re_street: Regex::new(r"(ул\.?|улица|пр-т|проспект|пр\.|пер\.?|переулок|ш\.|шоссе|б-р|бульвар|наб\.|набережная|пл\.|площадь|проезд|тупик|мкр\.?|микрорайон)\s*[\w\-. ]{1,40}").unwrap(),
+            // Сокращения обязаны заканчиваться точкой, полные слова — границей слова.
+            // Иначе «пер» ловится внутри «первого», «ао» внутри «хаос», и текст
+            // «тридцать первого декабря» маскируется как улица.
+            re_region: Regex::new(r"(\w+\s+)?\b(обл(асть|\.)|край|респ(ублика|\.)|ао|автономный округ)\b|\bреспублика \w+").unwrap(),
+            re_city: Regex::new(r"(г\.|пгт\.?|пос\.|с\.|дер\.|\b(?:город|поселок|село|деревня)\b)\s*[\w-]+(\s[\w-]+)?").unwrap(),
+            re_street: Regex::new(r"((?:ул|пр|пер|ш|наб|пл|мкр|бул|б-р|пр-т)\.|\b(?:ул|улица|проспект|переулок|шоссе|бульвар|набережная|площадь|проезд|тупик|микрорайон|пр-т|б-р)\b)\s*[\w\-. ]{1,40}").unwrap(),
             re_house: Regex::new(r"(д\.|дом)\s*\d+[а-я]?(\/\d+)?|(корп\.?|корпус|к\.)\s*\d+|(стр\.?|строение)\s*\d+").unwrap(),
             re_flat: Regex::new(r"(кв\.?|квартира|оф\.?|офис|комн\.?)\s*\d+").unwrap(),
             types: vec![
@@ -68,7 +71,7 @@ impl Detector for AddressDetector {
             }
             let span = doc.to_original(m.start(), m.end());
             let window = window(doc, m.start().saturating_sub(60), m.end() + 20);
-            let has_context = window.contains("индекс");
+            let has_context = has_word(window, "индекс");
             if has_context {
                 let mut c = Candidate::new(
                     PdType::new(PdType::ADDR_INDEX),
@@ -214,10 +217,15 @@ impl Detector for AddressDetector {
             let end = chain.last().unwrap().span.end;
             let span = crate::domain::document::Span::new(start, end);
 
-            let window = &doc.norm[..];
-            let has_addr_context = ["проживает", "зарегистрирован", "адрес регистрации", "адрес проживания", "прописан"]
-                .iter()
-                .any(|w| window.contains(w));
+            // Контекст ищем рядом с цепочкой, а не по всему документу: скан всего
+            // текста на каждую найденную цепочку давал квадратичную сложность
+            // (на 450 КБ это 4.6 с из 4.7 с всей детекции) и заодно поднимал score
+            // любому адресу, если слово «адрес» встречалось где угодно в тексте.
+            let ctx = original_window(doc.original, start, end, 120, 40);
+            let has_addr_context = has_any_word(
+                &ctx,
+                &["проживает", "зарегистрирован", "адрес", "прописан"],
+            );
             let score = if has_addr_context { (score + 0.2_f32).min(1.0_f32) } else { score };
 
             let mut cand = Candidate::new(
@@ -230,4 +238,17 @@ impl Detector for AddressDetector {
             out.push(cand);
         }
     }
+}
+/// Окрестность диапазона в исходном тексте, приведённая к нижнему регистру.
+/// Границы выравниваются по символам UTF-8.
+fn original_window(text: &str, start: usize, end: usize, left: usize, right: usize) -> String {
+    let mut lo = start.saturating_sub(left);
+    let mut hi = (end + right).min(text.len());
+    while lo > 0 && !text.is_char_boundary(lo) {
+        lo -= 1;
+    }
+    while hi < text.len() && !text.is_char_boundary(hi) {
+        hi += 1;
+    }
+    text[lo..hi].to_lowercase()
 }

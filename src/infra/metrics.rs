@@ -3,23 +3,36 @@
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use once_cell::sync::OnceCell;
 
-/// Глобальный handle для рендера метрик (устанавливается в start_exporter).
+/// Глобальный handle для рендера метрик (устанавливается в install).
 static HANDLE: OnceCell<PrometheusHandle> = OnceCell::new();
 
-/// Запускает Prometheus-экспортер на указанном адресе.
-pub fn start_exporter(addr: &str) -> anyhow::Result<()> {
-    let socket: std::net::SocketAddr = addr.parse()?;
-    let builder = PrometheusBuilder::new();
-    let (recorder, exporter) = builder.with_http_listener(socket).build()?;
-    // Устанавливаем глобальный recorder, чтобы макросы metrics::* писали в него.
+/// Устанавливает глобальный recorder и сохраняет handle ТОГО ЖЕ рекордера.
+///
+/// Раньше handle брался от второго, никуда не установленного рекордера, и
+/// `GET /metrics` всегда отдавал пустую строку.
+pub fn install() -> anyhow::Result<()> {
+    let recorder = PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
     metrics::set_global_recorder(recorder)
         .map_err(|e| anyhow::anyhow!("failed to set metrics recorder: {e}"))?;
-    // Сохраняем handle для рендера.
-    let handle = PrometheusBuilder::new().build_recorder().handle();
-    let _ = HANDLE.set(handle);
-    // Запускаем экспортер в фоне.
-    tokio::spawn(exporter);
+    HANDLE
+        .set(handle)
+        .map_err(|_| anyhow::anyhow!("metrics handle already installed"))?;
     Ok(())
+}
+
+/// Фоновая уборка гистограмм. Требует запущенного tokio-runtime.
+pub fn spawn_upkeep() {
+    let Some(handle) = HANDLE.get().cloned() else {
+        return;
+    };
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(5));
+        loop {
+            ticker.tick().await;
+            handle.run_upkeep();
+        }
+    });
 }
 
 /// Возвращает текущий Prometheus-текст.
@@ -93,4 +106,9 @@ pub fn inc_config_reload_failures() {
 /// Gauge версии конфига.
 pub fn set_config_version(v: u64) {
     metrics::gauge!("pdg_config_version").set(v as f64);
+}
+
+/// Счётчик утечек, обнаруженных самопроверкой после маскирования (DET-06).
+pub fn inc_leak_detected(pd_type: &str) {
+    metrics::counter!("pdg_leak_detected_total", "pd_type" => pd_type.to_string()).increment(1);
 }

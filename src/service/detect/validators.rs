@@ -183,21 +183,33 @@ pub fn parse_date(raw: &str) -> Option<(i32, u32, u32)> {
         return None;
     }
     let (a, b, c) = (digits[0], digits[1], digits[2]);
+
+    // Год впереди: гггг.мм.дд и гггг.дд.мм (п. 4.2 ТЗ).
+    if a > 31 {
+        let year = a as i32;
+        if !(1900..=2100).contains(&year) {
+            return None;
+        }
+        if valid_ymd(year, b, c) {
+            return Some((year, b, c));
+        }
+        if valid_ymd(year, c, b) {
+            return Some((year, c, b));
+        }
+        return None;
+    }
+
+    // Год в конце: дд.мм.гггг и мм.дд.гггг. Двузначный год трактуем как 20xx.
     let year = if c > 100 { c as i32 } else { 2000 + c as i32 };
     if !(1900..=2100).contains(&year) {
         return None;
     }
-    // dd.mm.yyyy
+    // Порядок важен: при неоднозначности (05.10.1990) выбираем российский дд.мм.
     if valid_ymd(year, b, a) {
         return Some((year, b, a));
     }
-    // mm.dd.yyyy (если день > 12 во второй позиции)
-    if a > 12 && valid_ymd(year, a, b) {
+    if valid_ymd(year, a, b) {
         return Some((year, a, b));
-    }
-    // yyyy.mm.dd
-    if a > 31 && valid_ymd(a as i32, b, c) {
-        return Some((a as i32, b, c));
     }
     None
 }

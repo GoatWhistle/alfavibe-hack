@@ -1,11 +1,14 @@
 version: 1
 
+# Конфиг нагрузочного прогона: отличается от config.yaml только лимитами,
+# чтобы измерять сервис, а не ограничитель частоты. Правила детекции те же.
+
 server:
   listen: "0.0.0.0:8080"
   admin_listen: "127.0.0.1:9090"
   max_body_bytes: 2000000
   request_timeout_ms: 950
-  max_inflight: 4096
+  max_inflight: 16384
   heavy_text_threshold_bytes: 65536
 
 security:
@@ -141,12 +144,14 @@ systems:
     key_sha256: "env:PDG_KEY_CRM_SHA256"
     profile: strict
     demask: true
-    rate_limit_rps: 500
+    rate_limit_rps: 50000
   payments-bot:
     enabled: true
     key_sha256: "env:PDG_KEY_PAY_SHA256"
     profile: cards_only
     demask: true
+    # Намеренно низкий лимит: профиль ratelimit проверяет 429 + Retry-After.
+    rate_limit_rps: 200
     overrides:
       types:
         PHONE: { mask: partial }

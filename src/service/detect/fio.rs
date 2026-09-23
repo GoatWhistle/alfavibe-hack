@@ -6,7 +6,7 @@ use crate::domain::document::Document;
 use crate::domain::entity::{Candidate, DetectorSource, SignalFlags};
 use crate::domain::pd_type::PdType;
 use crate::domain::traits::{DetectCtx, Detector};
-use crate::service::detect::context::window;
+use crate::service::detect::context::{has_any_word, window};
 
 bitflags::bitflags! {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -195,9 +195,10 @@ impl Detector for FioDetector {
             // одиночная фамилия с контекстом
             if flags.contains(TokFlags::SURNAME_SHAPE) {
                 let window = window(doc, t.start.saturating_sub(60), t.end + 20);
-                let has_context = ["клиент", "гражданин", "господин", "г-н", "г-жа", "фамилия", "фио", "заемщик", "получатель", "отправитель"]
-                    .iter()
-                    .any(|w| window.contains(w));
+                let has_context = has_any_word(
+                    window,
+                    &["клиент", "гражданин", "господин", "г-н", "г-жа", "фамилия", "фио", "заемщик", "получатель", "отправитель"],
+                );
                 if has_context {
                     push_fio(doc, out, t.start, t.end, 0.75);
                 }

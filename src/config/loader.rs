@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use aho_corasick::{AhoCorasick, MatchKind};
-use regex::Regex;
+use regex::{Regex, RegexSet};
 use thiserror::Error;
 
 use crate::domain::pd_type::PdType;
@@ -98,6 +98,22 @@ fn compile(cfg: Config, base_dir: &Path) -> Result<CompiledConfig, ConfigError> 
         )
     };
 
+    // PERF-11: RegexSet по всем паттернам конфиг-детекторов.
+    let prefilter_regex_set = if detector_regexes.is_empty() {
+        None
+    } else {
+        let mut patterns: Vec<&str> = Vec::new();
+        for re in detector_regexes.values() {
+            patterns.push(re.as_str());
+        }
+        Some(
+            RegexSet::new(patterns).map_err(|e| ConfigError::Validation {
+                path: "pd_types.*.detector.regex".into(),
+                msg: format!("regex set build: {e}"),
+            })?,
+        )
+    };
+
     // Загрузка ресурсов.
     let first_names = load_lines(&cfg.resources.first_names, base_dir)?;
     let public_persons = load_pipe_lines(&cfg.resources.public_persons, base_dir)?;
@@ -121,6 +137,7 @@ fn compile(cfg: Config, base_dir: &Path) -> Result<CompiledConfig, ConfigError> 
     let admin_token_sha256 = resolve_secret(&cfg.security.admin_token_sha256)?;
 
     let mut system_keys = HashMap::new();
+    let mut system_key_bytes = HashMap::new();
     let mut system_enabled = HashMap::new();
     let mut system_profile = HashMap::new();
     let mut system_demask = HashMap::new();
@@ -128,7 +145,12 @@ fn compile(cfg: Config, base_dir: &Path) -> Result<CompiledConfig, ConfigError> 
     let mut system_overrides = HashMap::new();
     let mut system_route_overrides = HashMap::new();
     for (id, sc) in &cfg.systems {
-        system_keys.insert(id.clone(), resolve_secret(&sc.key_sha256)?);
+        let key_hex = resolve_secret(&sc.key_sha256)?;
+        system_keys.insert(id.clone(), key_hex.clone());
+        // PERF-06: декодируем hex в 32 сырых байта один раз.
+        if let Some(bytes) = decode_hex32(&key_hex) {
+            system_key_bytes.insert(id.clone(), bytes);
+        }
         system_enabled.insert(id.clone(), sc.enabled);
         system_profile.insert(id.clone(), sc.profile.clone());
         system_demask.insert(id.clone(), sc.demask);
@@ -144,7 +166,7 @@ fn compile(cfg: Config, base_dir: &Path) -> Result<CompiledConfig, ConfigError> 
     let placeholder_format = cfg.defaults.placeholder.format.clone();
     let default_action = cfg.defaults.action.clone();
 
-    Ok(CompiledConfig {
+    let mut compiled = CompiledConfig {
         version: 1,
         raw: cfg.clone(),
         detector_regexes,
@@ -152,6 +174,7 @@ fn compile(cfg: Config, base_dir: &Path) -> Result<CompiledConfig, ConfigError> 
         detector_base_scores,
         detector_context,
         context_ac,
+        prefilter_regex_set,
         first_names,
         public_persons,
         bank_offices,
@@ -166,6 +189,7 @@ fn compile(cfg: Config, base_dir: &Path) -> Result<CompiledConfig, ConfigError> 
         master_key_b64,
         admin_token_sha256,
         system_keys,
+        system_key_bytes,
         system_enabled,
         system_profile,
         system_demask,
@@ -178,7 +202,25 @@ fn compile(cfg: Config, base_dir: &Path) -> Result<CompiledConfig, ConfigError> 
         routes: cfg.routes.clone(),
         placeholder_format,
         default_action,
-    })
+    };
+
+    // PERF-05: предвычисляем эффективные политики для всех (система × маршрут).
+    let mut policies: HashMap<(String, Option<String>), Arc<EffectivePolicy>> = HashMap::new();
+    for system_id in compiled.system_enabled.keys() {
+        // Без маршрута.
+        if let Ok(p) = resolve_policy(&compiled, system_id, None) {
+            policies.insert((system_id.clone(), None), p);
+        }
+        // С каждым маршрутом.
+        for route in &compiled.routes {
+            if let Ok(p) = resolve_policy(&compiled, system_id, Some(&route.id)) {
+                policies.insert((system_id.clone(), Some(route.id.clone())), p);
+            }
+        }
+    }
+    compiled.policies = policies;
+
+    Ok(compiled)
 }
 
 fn validate(cfg: &Config) -> Result<(), ConfigError> {
@@ -292,6 +334,20 @@ pub fn resolve_secret(s: &str) -> Result<String, ConfigError> {
     } else {
         Ok(s.to_string())
     }
+}
+
+/// Декодирует hex-строку в 32 байта (для ключей систем). Возвращает None при неверной длине.
+fn decode_hex32(s: &str) -> Option<[u8; 32]> {
+    if s.len() != 64 {
+        return None;
+    }
+    let mut out = [0u8; 32];
+    for (i, chunk) in s.as_bytes().chunks(2).enumerate() {
+        let hi = (chunk[0] as char).to_digit(16)?;
+        let lo = (chunk[1] as char).to_digit(16)?;
+        out[i] = ((hi << 4) | lo) as u8;
+    }
+    Some(out)
 }
 
 /// PolicyResolver: (system, route) → EffectivePolicy.
@@ -455,6 +511,8 @@ fn build_effective(
             Some("fail") => NerOnFailure::Fail,
             _ => NerOnFailure::Degrade,
         },
+        max_windows_per_request: cfg.raw.ner.max_windows_per_request,
+        trigger_words: cfg.raw.ner.trigger_words.clone(),
         filters: p.filters.clone(),
         ambiguous_ids: match p.ambiguous_ids.as_deref() {
             Some("mask") => AmbiguousIdsMode::Mask,
@@ -508,7 +566,41 @@ fn build_effective(
         }
     }
 
+    enable_address_components(&mut ep);
     ep
+}
+
+/// В режиме components ADDRESS разворачивается в ADDR_*, поэтому компоненты
+/// должны попасть в список разрешённых типов: иначе конвейер отбросит их
+/// вместе со всеми типами, которых нет в профиле.
+pub fn enable_address_components(ep: &mut EffectivePolicy) {
+    if ep.address_mode != AddressMode::Components {
+        return;
+    }
+    let address = PdType::new(PdType::ADDRESS);
+    if !ep.types.contains(&address) {
+        return;
+    }
+    let kind = ep
+        .mask_kinds
+        .get(&address)
+        .copied()
+        .unwrap_or(MaskKind::Placeholder);
+    for name in [
+        PdType::ADDR_COUNTRY,
+        PdType::ADDR_INDEX,
+        PdType::ADDR_REGION,
+        PdType::ADDR_CITY,
+        PdType::ADDR_STREET,
+        PdType::ADDR_HOUSE,
+        PdType::ADDR_FLAT,
+    ] {
+        let t = PdType::new(name);
+        if !ep.types.contains(&t) {
+            ep.types.push(t.clone());
+        }
+        ep.mask_kinds.entry(t).or_insert(kind);
+    }
 }
 
 /// Применяет deep_merge к EffectivePolicy (для route.types_override уже сделано на уровне ProfileConfig).
@@ -535,6 +627,7 @@ pub fn merge_type_mask(ep: &mut EffectivePolicy, t: &PdType, tm: &TypeMaskConfig
     if let Some(mode) = &tm.mode {
         if mode == "components" {
             ep.address_mode = AddressMode::Components;
+            enable_address_components(ep);
         }
     }
 }

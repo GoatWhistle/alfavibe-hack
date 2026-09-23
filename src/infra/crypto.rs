@@ -121,6 +121,14 @@ pub fn sha256_hex(data: &[u8]) -> String {
     result.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// SHA-256 как 32 сырых байта (PERF-06).
+pub fn sha256_raw(data: &[u8]) -> [u8; 32] {
+    use sha2::Digest;
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hasher.finalize().into()
+}
+
 /// SHA-512 (для хранения ключей систем).
 pub fn sha512_hex(data: &[u8]) -> String {
     use sha2::Digest;

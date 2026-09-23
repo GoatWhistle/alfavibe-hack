@@ -7,7 +7,7 @@ use crate::domain::entity::{Candidate, DetectorSource, SignalFlags};
 use crate::domain::pd_type::PdType;
 use crate::domain::traits::{DetectCtx, Detector, ValidationResult, Validator};
 
-use super::context::{is_boundary, window};
+use super::context::{has_word, is_boundary, window};
 use super::validators::SnilsValidator;
 
 pub struct SnilsDetector {
@@ -53,7 +53,7 @@ impl Detector for SnilsDetector {
             }
             let span = doc.to_original(m.start(), m.end());
             let window = window(doc, m.start().saturating_sub(60), m.end() + 20);
-            let has_context = window.contains("снилс");
+            let has_context = has_word(window, "снилс");
             let mut cand = Candidate::new(
                 PdType::new(PdType::SNILS),
                 span,

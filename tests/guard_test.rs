@@ -134,13 +134,14 @@ routes: []
     registry.register(Arc::new(pd_guard::service::detect::documents::DriverLicenseDetector::new()));
     registry.register(Arc::new(pd_guard::service::detect::documents::BirthPlaceDetector::new(cfg.cities.clone(), cfg.countries.clone())));
     registry.register(Arc::new(pd_guard::service::detect::documents::PassportIssuerDetector::new(cfg.issuing_authorities.clone())));
+    registry.register(Arc::new(pd_guard::service::detect::structured::StructuredFieldDetector::new()));
 
     let detectors: Vec<Arc<dyn Detector>> = registry.detectors.clone();
     let validators: Vec<Arc<dyn Validator>> = vec![];
     let context_scorers: Vec<Arc<dyn pd_guard::domain::traits::ContextScorer>> = vec![];
     let filters: Vec<Arc<dyn RelevanceFilter>> = vec![
         Arc::new(PublicPersonFilter { persons: cfg.public_persons.clone() }),
-        Arc::new(BankAllowlistFilter { offices: cfg.bank_offices.clone(), phones: cfg.bank_phones.clone() }),
+        Arc::new(BankAllowlistFilter::new(cfg.bank_offices.clone(), cfg.bank_phones.clone())),
         Arc::new(OrgContextFilter),
         Arc::new(NegativeNumberContext),
     ];
@@ -169,6 +170,7 @@ routes: []
         combination,
         maskers_by_kind,
         default_masker: placeholder,
+        prefilter_regex_set: cfg.prefilter_regex_set.clone(),
     });
 
     let service = Arc::new(GuardService {
@@ -179,6 +181,7 @@ routes: []
         vault_mode: "memory".into(),
         ttl: Duration::from_secs(900),
         delete_after_demask: false,
+        heavy_text_threshold_bytes: 65536,
     });
 
     (service, cfg)
@@ -203,7 +206,7 @@ async fn mask_demask_roundtrip() {
     let deadline = Instant::now() + Duration::from_secs(1);
 
     let text = "Клиент Иванов Иван Иванович, паспорт 4509 123456, телефон +7 912 345-67-89, email ivanov@mail.ru, карта 4532 0151 1283 0366";
-    let mask_result = service.mask(&policy, "crm-assistant", text, None, deadline).await.unwrap();
+    let mask_result = service.mask(&policy, "crm-assistant", text, None, deadline, false).await.unwrap();
 
     // Маскированный текст не содержит исходных значений.
     assert!(!mask_result.text.contains("Иванов Иван"));
@@ -227,7 +230,7 @@ async fn mask_does_not_leak_pd() {
     let deadline = Instant::now() + Duration::from_secs(1);
 
     let text = "Клиент Иванов Иван, телефон +7 912 345-67-89";
-    let mask_result = service.mask(&policy, "crm-assistant", text, None, deadline).await.unwrap();
+    let mask_result = service.mask(&policy, "crm-assistant", text, None, deadline, false).await.unwrap();
     assert!(!mask_result.text.contains("Иванов"));
     assert!(!mask_result.text.contains("912"));
 }
@@ -241,12 +244,12 @@ async fn pin_requires_card() {
 
     // PIN без карты — не маскируется.
     let text = "Пин-код 1234";
-    let mask_result = service.mask(&policy, "crm-assistant", text, None, deadline).await.unwrap();
+    let mask_result = service.mask(&policy, "crm-assistant", text, None, deadline, false).await.unwrap();
     assert!(mask_result.text.contains("1234"));
 
     // PIN с картой — маскируется.
     let text2 = "Карта 4532 0151 1283 0366, пин-код 1234";
-    let mask_result2 = service.mask(&policy, "crm-assistant", text2, None, deadline).await.unwrap();
+    let mask_result2 = service.mask(&policy, "crm-assistant", text2, None, deadline, false).await.unwrap();
     assert!(!mask_result2.text.contains("1234"));
 }
 
@@ -259,7 +262,7 @@ async fn public_person_not_masked() {
 
     // Пушкин-поэт не маскируется.
     let text = "Александр Сергеевич Пушкин — великий поэт";
-    let mask_result = service.mask(&policy, "crm-assistant", text, None, deadline).await.unwrap();
+    let mask_result = service.mask(&policy, "crm-assistant", text, None, deadline, false).await.unwrap();
     assert!(mask_result.text.contains("Пушкин"));
 }
 
@@ -272,13 +275,13 @@ async fn multiple_entities_same_type_get_distinct_placeholders() {
 
     // Два разных человека — разные плейсхолдеры.
     let text = "Клиенты Иванов Иван и Петров Петр";
-    let mask_result = service.mask(&policy, "crm-assistant", text, None, deadline).await.unwrap();
+    let mask_result = service.mask(&policy, "crm-assistant", text, None, deadline, false).await.unwrap();
     assert!(mask_result.text.contains("[ФИО_1]"));
     assert!(mask_result.text.contains("[ФИО_2]"));
 
     // Один и тот же человек дважды — один плейсхолдер.
     let text2 = "Иванов Иван и снова Иванов Иван";
-    let mask_result2 = service.mask(&policy, "crm-assistant", text2, None, deadline).await.unwrap();
+    let mask_result2 = service.mask(&policy, "crm-assistant", text2, None, deadline, false).await.unwrap();
     let count = mask_result2.text.matches("[ФИО_1]").count();
     assert_eq!(count, 2, "same person twice should get same placeholder");
 }
@@ -291,7 +294,7 @@ async fn address_detected() {
     let deadline = Instant::now() + Duration::from_secs(1);
 
     let text = "Проживает по адресу: г. Москва, ул. Тверская, д. 12, кв. 34";
-    let mask_result = service.mask(&policy, "crm-assistant", text, None, deadline).await.unwrap();
+    let mask_result = service.mask(&policy, "crm-assistant", text, None, deadline, false).await.unwrap();
     // Адрес должен быть замаскирован (не содержать "Тверская").
     assert!(!mask_result.text.contains("Тверская"), "street should be masked: {}", mask_result.text);
 }
@@ -304,8 +307,88 @@ async fn driver_license_detected() {
     let deadline = Instant::now() + Duration::from_secs(1);
 
     let text = "Водительское удостоверение 77 12 345678";
-    let mask_result = service.mask(&policy, "crm-assistant", text, None, deadline).await.unwrap();
+    let mask_result = service.mask(&policy, "crm-assistant", text, None, deadline, false).await.unwrap();
     assert!(!mask_result.text.contains("345678"), "driver license should be masked");
+}
+
+#[tokio::test]
+async fn word_boundary_context_does_not_false_negative() {
+    // DET-04: «тип», «принцип», «хаос» не должны ломать детекцию ИНН/ФИО.
+    let (service, cfg) = build_service();
+    let resolver = pd_guard::service::policy_resolver::PolicyResolver::new(cfg.clone());
+    let policy = resolver.resolve("crm-assistant", None).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(1);
+
+    // ИНН физлица рядом со словом «тип» не должен классифицироваться как ИНН организации.
+    let text = "Тип операции, ИНН 500100732259";
+    let mask_result = service.mask(&policy, "crm-assistant", text, None, deadline, false).await.unwrap();
+    assert!(!mask_result.text.contains("500100732259"), "INN should be masked: {}", mask_result.text);
+
+    // «хаос» не должен срабатывать как «ао» (ИНН организации).
+    let text2 = "Хаос в данных, ИНН 500100732259";
+    let mask_result2 = service.mask(&policy, "crm-assistant", text2, None, deadline, false).await.unwrap();
+    assert!(!mask_result2.text.contains("500100732259"), "INN should be masked: {}", mask_result2.text);
+}
+
+#[tokio::test]
+async fn structured_field_detected() {
+    // DET-03: имя поля как сильный контекстный сигнал.
+    let (service, cfg) = build_service();
+    let resolver = pd_guard::service::policy_resolver::PolicyResolver::new(cfg.clone());
+    let policy = resolver.resolve("crm-assistant", None).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(1);
+
+    let text = r#"{"passport": "4509 123456", "phone": "+7 912 345-67-89"}"#;
+    let result = service.mask(&policy, "crm-assistant", text, None, deadline, false).await.unwrap();
+    assert!(!result.text.contains("4509 123456"), "passport should be masked: {}", result.text);
+    assert!(!result.text.contains("912 345-67-89"), "phone should be masked: {}", result.text);
+}
+
+#[tokio::test]
+async fn dry_run_returns_entities_without_masking() {
+    // FEAT-05: dry_run возвращает перечень того, что было бы замаскировано,
+    // без изменения текста и без записи маппинга.
+    let (service, cfg) = build_service();
+    let resolver = pd_guard::service::policy_resolver::PolicyResolver::new(cfg.clone());
+    let policy = resolver.resolve("crm-assistant", None).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(1);
+
+    let text = "Клиент Иванов Иван Иванович, телефон +7 912 345-67-89";
+    let result = service.mask(&policy, "crm-assistant", text, None, deadline, true).await.unwrap();
+
+    // Текст не изменён.
+    assert_eq!(result.text, text);
+    // Маппинг пуст (не записывается).
+    assert!(result.mapping.entries.is_empty());
+    // Сущности найдены.
+    assert!(!result.entities.is_empty());
+    let types: Vec<&str> = result.entities.iter().map(|e| e.pd_type.as_str()).collect();
+    assert!(types.contains(&"FIO"));
+    assert!(types.contains(&"PHONE"));
+}
+
+#[tokio::test]
+async fn stateless_demask_roundtrip() {
+    // FEAT-02: stateless-демаскирование через mask_context (без vault).
+    let (service, cfg) = build_service();
+    let resolver = pd_guard::service::policy_resolver::PolicyResolver::new(cfg.clone());
+    let policy = resolver.resolve("crm-assistant", None).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(1);
+
+    // Пересобираем сервис в stateless-режиме.
+    let mut service = service;
+    Arc::get_mut(&mut service).unwrap().vault_mode = "stateless".into();
+
+    let text = "Клиент Иванов Иван Иванович, телефон +7 912 345-67-89";
+    let mask_result = service.mask(&policy, "crm-assistant", text, None, deadline, false).await.unwrap();
+    assert!(mask_result.mask_context.is_some(), "stateless mode should return mask_context");
+
+    // Демаскирование на «другой реплике» — только по mask_context.
+    let demask_result = service
+        .demask(&policy, "crm-assistant", &mask_result.text, &mask_result.session_id, mask_result.mask_context.as_deref(), deadline)
+        .await
+        .unwrap();
+    assert_eq!(demask_result.text, text);
 }
 
 proptest::proptest! {
@@ -322,7 +405,7 @@ proptest::proptest! {
             let policy = resolver.resolve("crm-assistant", None).unwrap();
             let deadline = Instant::now() + Duration::from_secs(1);
             let text = format!("Клиент {name}, телефон {phone}, email {email}");
-            let mask_result = service.mask(&policy, "crm-assistant", &text, None, deadline).await.unwrap();
+            let mask_result = service.mask(&policy, "crm-assistant", &text, None, deadline, false).await.unwrap();
             let demask_result = service.demask(&policy, "crm-assistant", &mask_result.text, &mask_result.session_id, None, deadline).await.unwrap();
             assert_eq!(demask_result.text, text);
         });

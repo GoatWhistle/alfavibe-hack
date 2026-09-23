@@ -20,6 +20,7 @@ pub struct ProxyHandler {
     pub cfg: Arc<CompiledConfig>,
     pub service: Arc<GuardService>,
     pub resolver: Arc<PolicyResolver>,
+    pub rate_limiter: Arc<crate::infra::rate_limit::RateLimiter>,
 }
 
 impl ProxyHandler {
@@ -28,14 +29,38 @@ impl ProxyHandler {
         let auth = middleware::authenticate(&self.cfg, req.headers());
         let (system_id, request_id) = match auth {
             Ok(ctx) => (ctx.system_id, ctx.request_id),
-            Err(status) => {
-                return error_response(status, ServiceError::Unauthorized, &request_id);
+            Err(failure) => {
+                return error_response(failure.status(), ServiceError::Unauthorized, &request_id);
             }
         };
 
-        // Найти маршрут по path.
+        // OPS-03: ограничение частоты по системам.
+        let rps = self.cfg.system_rate_limit.get(&system_id).copied().unwrap_or(0);
+        if let Err(retry_after) = self.rate_limiter.check(&system_id, rps) {
+            let secs = retry_after.as_secs().max(1);
+            return Response::builder()
+                .status(StatusCode::TOO_MANY_REQUESTS)
+                .header("retry-after", secs.to_string())
+                .body(Bytes::from(
+                    serde_json::to_vec(&super::dto::ErrorResponse {
+                        error: super::dto::ErrorBody {
+                            code: "rate_limited".into(),
+                            message: "rate limit exceeded".into(),
+                            request_id: request_id.clone(),
+                        },
+                    })
+                    .unwrap_or_default(),
+                ))
+                .unwrap();
+        }
+
+        // Найти маршрут по path. `/proxy/v1/chat/completions` → `/v1/chat/completions`.
         let path = req.uri().path().to_string();
-        let route_path = path.strip_prefix("/proxy/").unwrap_or("").to_string();
+        let route_path = path
+            .strip_prefix("/proxy")
+            .map(|p| if p.is_empty() { "/" } else { p })
+            .unwrap_or(&path)
+            .to_string();
         let route = self
             .cfg
             .routes
@@ -116,7 +141,7 @@ impl ProxyHandler {
                 let sys = sys.clone();
                 let s = s.to_string();
                 async move {
-                    match service.mask(&policy, &sys, &s, Some(&sid), dl).await {
+                    match service.mask(&policy, &sys, &s, Some(&sid), dl, false).await {
                         Ok(r) => {
                             if r.degraded {
                                 degraded_flag.store(true, std::sync::atomic::Ordering::Relaxed);

@@ -162,6 +162,10 @@ pub struct EffectivePolicy {
     pub ner_enabled: bool,
     pub ner_types: Vec<PdType>,
     pub ner_on_failure: NerOnFailure,
+    /// OPS-04: лимит окон NER (из конфига).
+    pub max_windows_per_request: usize,
+    /// OPS-04: триггерные слова NER (из конфига).
+    pub trigger_words: Vec<String>,
     pub filters: Vec<String>,
     pub combination: CombinationConfig,
     pub json_paths: Vec<String>,

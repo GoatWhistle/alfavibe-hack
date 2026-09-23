@@ -7,14 +7,8 @@ use crate::domain::entity::{Candidate, DetectorSource, SignalFlags};
 use crate::domain::pd_type::PdType;
 use crate::domain::traits::{DetectCtx, Detector, ValidationResult, Validator};
 
-use super::context::{is_boundary, window};
+use super::context::{has_any_word, has_word, is_boundary, window};
 use super::validators::InnValidator;
-
-/// Проверяет, есть ли слово в тексте (с границами слов).
-fn has_word(text: &str, word: &str) -> bool {
-    text.split(|c: char| !c.is_alphanumeric())
-        .any(|w| w == word)
-}
 
 pub struct InnDetector {
     re: Regex,
@@ -31,7 +25,7 @@ impl Default for InnDetector {
 impl InnDetector {
     pub fn new() -> Self {
         Self {
-            re: Regex::new(r"\d{10}|\d{12}").unwrap(),
+            re: Regex::new(r"\d{12}|\d{10}").unwrap(),
             validator: InnValidator,
             types: vec![PdType::new(PdType::INN), PdType::new(PdType::ORG_INN)],
         }
@@ -56,11 +50,9 @@ impl Detector for InnDetector {
 
             // Негативный контекст для INN: инн организации, ооо, ао, пао, ип (как отдельные слова).
             let window = window(doc, m.start().saturating_sub(60), m.end() + 20);
-            let org_context = ["инн организации", "инн банка", "ооо", "пао"]
-                .iter()
-                .any(|w| window.contains(w))
-                || has_word(window, "ао")
-                || has_word(window, "ип");
+            let org_context = has_any_word(window, &["ооо", "пао", "ао", "ип"])
+                || window.contains("инн организации")
+                || window.contains("инн банка");
 
             let pd_type = if is_org || org_context {
                 PdType::new(PdType::ORG_INN)
@@ -75,7 +67,7 @@ impl Detector for InnDetector {
                 DetectorSource::Checksum { id: "inn".into() },
             );
 
-            let has_inn_context = window.contains("инн");
+            let has_inn_context = has_word(window, "инн");
             match self.validator.validate(digits) {
                 ValidationResult::Valid => {
                     cand.signals |= SignalFlags::CHECKSUM_OK;

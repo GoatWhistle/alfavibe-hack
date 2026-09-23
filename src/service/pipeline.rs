@@ -46,6 +46,8 @@ pub struct PipelineCtx {
     pub combination: Arc<dyn CombinationRule>,
     pub maskers_by_kind: std::collections::HashMap<MaskKind, Arc<dyn Masker>>,
     pub default_masker: Arc<dyn Masker>,
+    /// PERF-11: RegexSet по паттернам конфиг-детекторов (для префильтра).
+    pub prefilter_regex_set: Option<regex::RegexSet>,
 }
 
 /// Маскирует одну строку.
@@ -56,19 +58,49 @@ pub async fn mask_line(
     state: &mut MaskState,
     deadline: Instant,
 ) -> MaskLineResult {
+    // PERF-12: ранний выход для текста без признаков ПД.
+    if !has_pd_signal(original) {
+        return MaskLineResult {
+            text: original.to_string(),
+            entities: Vec::new(),
+            records: Vec::new(),
+            degraded: false,
+            ner_failed: false,
+        };
+    }
+
     let doc = Document::new(original);
     let mut candidates: Vec<Candidate> = Vec::new();
     let mut degraded = false;
 
     // Stage A — детерминированные детекторы.
-    let detect_ctx = DetectCtx::default();
-    for d in &ctx.detectors {
+    // PERF-11: префильтр — RegexSet по паттернам конфиг-детекторов.
+    let mut detect_ctx = DetectCtx::default();
+    if let Some(regex_set) = &ctx.prefilter_regex_set {
+        let matches = regex_set.matches(&doc.norm);
+        // Индексы конфиг-детекторов (id == "config_regex"), чьи паттерны сматчились.
+        for (i, d) in ctx.detectors.iter().enumerate() {
+            if d.id() == "config_regex" && matches.matched_any() {
+                detect_ctx.active_detectors.push(i);
+            }
+        }
+    }
+    for (i, d) in ctx.detectors.iter().enumerate() {
+        // PERF-22: проверка дедлайна между стадиями.
+        if Instant::now() >= deadline {
+            degraded = true;
+            break;
+        }
         // Только типы из политики (но ORG_INN участвует в разрешении).
         let relevant = d
             .types()
             .iter()
             .any(|t| policy.types.contains(t) || t.as_str() == PdType::ORG_INN);
         if !relevant {
+            continue;
+        }
+        // PERF-11: пропускаем конфиг-детекторы, чьи паттерны не сматчились.
+        if d.id() == "config_regex" && !detect_ctx.active_detectors.contains(&i) {
             continue;
         }
         d.detect(&doc, &detect_ctx, &mut candidates);
@@ -101,7 +133,7 @@ pub async fn mask_line(
     }
 
     // Relevance-фильтры (только те, что указаны в политике).
-    let all_candidates = candidates.clone();
+    // PERF-09: фильтрам передаётся срез исходных кандидатов, без клонирования всего вектора.
     let active_filters: Vec<&Arc<dyn RelevanceFilter>> = if policy.filters.is_empty() {
         ctx.filters.iter().collect()
     } else {
@@ -110,11 +142,17 @@ pub async fn mask_line(
             .filter(|f| policy.filters.iter().any(|id| id == f.id()))
             .collect()
     };
-    candidates.retain(|c| {
-        active_filters
-            .iter()
-            .all(|f| f.keep(&doc, c, &all_candidates))
-    });
+    let all_candidates = std::mem::take(&mut candidates);
+    candidates = all_candidates
+        .iter()
+        .filter(|c| active_filters.iter().all(|f| f.keep(&doc, c, &all_candidates)))
+        .cloned()
+        .collect();
+
+    // PERF-22: дедлайн перед resolver.
+    if Instant::now() >= deadline {
+        degraded = true;
+    }
 
     // Resolver.
     let mut entities = ctx.resolver.resolve(candidates, policy);
@@ -136,6 +174,11 @@ pub async fn mask_line(
         }
         entities = expanded;
     }
+
+    // Профиль решает, что маскировать: детектор может породить тип, которого в
+    // профиле нет (ORG_INN и DATE участвуют в разрешении конфликтов, но сами по
+    // себе не маскируются), поэтому лишнее отбрасываем перед маскированием.
+    entities.retain(|e| policy.types.contains(&e.pd_type));
 
     // Вычислить canonical для каждой сущности.
     for e in entities.iter_mut() {
@@ -195,12 +238,69 @@ pub async fn mask_line(
     }
     text.push_str(&original[cursor..]);
 
+    // DET-06: самопроверка — прогоняем детекторы по уже маскированному тексту.
+    // Любая находка инкрементирует метрику утечки.
+    self_check(ctx, policy, &text);
+
     MaskLineResult {
         text,
         entities: masked_entities,
         records,
         degraded,
         ner_failed,
+    }
+}
+
+/// PERF-12: быстрая проверка наличия признаков ПД в тексте.
+/// Если нет цифр, '@', заглавных букв и контекстных слов — ПД нет.
+fn has_pd_signal(text: &str) -> bool {
+    let mut has_digit = false;
+    let mut has_at = false;
+    let mut has_upper = false;
+    for c in text.chars() {
+        if c.is_ascii_digit() {
+            has_digit = true;
+        } else if c == '@' {
+            has_at = true;
+        } else if c.is_uppercase() {
+            has_upper = true;
+        }
+        if has_digit && has_at && has_upper {
+            return true;
+        }
+    }
+    // Контекстные слова (регистронезависимо).
+    if has_upper {
+        let lower = text.to_lowercase();
+        const TRIGGERS: &[&str] = &[
+            "паспорт", "серия", "телефон", "клиент", "гражданин", "инн", "снилс", "карта",
+            "пин", "cvv", "email", "адрес", "проживает", "родился", "родилась", "выдан",
+            "водительск", "держатель", "фио", "дата рождения",
+        ];
+        if TRIGGERS.iter().any(|w| lower.contains(w)) {
+            return true;
+        }
+    }
+    has_digit || has_at || has_upper
+}
+
+/// DET-06: повторный прогон детекторов по маскированному тексту.
+fn self_check(ctx: &PipelineCtx, policy: &EffectivePolicy, masked: &str) {
+    let doc = Document::new(masked);
+    let detect_ctx = DetectCtx::default();
+    let mut leaks: Vec<Candidate> = Vec::new();
+    for d in &ctx.detectors {
+        let relevant = d
+            .types()
+            .iter()
+            .any(|t| policy.types.contains(t) || t.as_str() == PdType::ORG_INN);
+        if !relevant {
+            continue;
+        }
+        d.detect(&doc, &detect_ctx, &mut leaks);
+    }
+    for c in leaks {
+        crate::infra::metrics::inc_leak_detected(c.pd_type.as_str());
     }
 }
 
@@ -235,9 +335,14 @@ fn select_ner_windows(
         }
     }
 
-    // Ограничение по max_windows.
-    if windows.len() > policy.ner_types.len().max(1) * 64 {
-        windows.truncate(64);
+    // Ограничение по max_windows (OPS-04: из конфига).
+    let max_windows = if policy.max_windows_per_request > 0 {
+        policy.max_windows_per_request
+    } else {
+        policy.ner_types.len().max(1) * 64
+    };
+    if windows.len() > max_windows {
+        windows.truncate(max_windows);
     }
     windows
 }

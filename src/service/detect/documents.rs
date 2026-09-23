@@ -7,7 +7,7 @@ use crate::domain::entity::{Candidate, DetectorSource, SignalFlags};
 use crate::domain::pd_type::PdType;
 use crate::domain::traits::{DetectCtx, Detector};
 
-use super::context::{is_boundary, window};
+use super::context::{has_any_prefix, is_boundary, window};
 
 /// Водительское удостоверение (DRIVER_LICENSE).
 pub struct DriverLicenseDetector {
@@ -44,9 +44,13 @@ impl Detector for DriverLicenseDetector {
             }
             // Только с контекстом.
             let w = window(doc, m.start().saturating_sub(60), m.end() + 20);
-            let has_context = ["водительск", "в/у", "ву", "права", "удостоверение водителя", "driver"]
-                .iter()
-                .any(|k| w.contains(k));
+            // «в/у» разбивается на «в» и «у», поэтому ищем его подстрокой,
+            // а основы слов — префиксным сравнением.
+            let has_context = has_any_prefix(
+                w,
+                &["водительск", "удостоверен", "прав", "driver", "license"],
+            ) || w.contains("в/у")
+                || w.contains("в\\у");
             if !has_context {
                 continue;
             }
@@ -61,6 +65,52 @@ impl Detector for DriverLicenseDetector {
             out.push(cand);
         }
     }
+}
+
+/// Захватывает значение после триггера: до разделителя, конца строки или лимита.
+///
+/// Ключевой момент — значение, упирающееся в конец текста, тоже считается
+/// найденным: раньше `end` оставался равен `start`, и «место рождения г. Казань»
+/// в конце строки не детектировалось вовсе.
+fn capture_value(norm: &str, start: usize, max_bytes: usize, stop_at_dot: bool) -> (usize, &str) {
+    let rest = &norm[start..];
+    // Ведущие пробелы в значение не входят, иначе маска съедает пробел перед собой.
+    let lead: usize = rest
+        .char_indices()
+        .take_while(|(_, c)| c.is_whitespace())
+        .map(|(i, c)| i + c.len_utf8())
+        .last()
+        .unwrap_or(0);
+    let rest = &rest[lead..];
+    let mut end = rest.len();
+    for (i, ch) in rest.char_indices() {
+        if i >= max_bytes {
+            end = i;
+            break;
+        }
+        if matches!(ch, ';' | '\n' | ',') {
+            end = i;
+            break;
+        }
+        // Точка обрывает значение, только если это не сокращение вида «г.», «ул.»,
+        // иначе «ОУФМС России по г. Москве» обрезается на первом же «г.».
+        if stop_at_dot && ch == '.' && !is_abbreviation_dot(rest, i) {
+            end = i;
+            break;
+        }
+    }
+    (lead, rest[..end].trim_end())
+}
+
+/// Точка после короткого слова (1–3 буквы) — сокращение, а не конец предложения.
+fn is_abbreviation_dot(text: &str, dot_pos: usize) -> bool {
+    let before = &text[..dot_pos];
+    let word_len = before
+        .chars()
+        .rev()
+        .take_while(|c| c.is_alphabetic())
+        .count();
+    (1..=3).contains(&word_len)
 }
 
 /// Место рождения (BIRTH_PLACE).
@@ -97,24 +147,12 @@ impl Detector for BirthPlaceDetector {
     }
     fn detect(&self, doc: &Document<'_>, _ctx: &DetectCtx, out: &mut Vec<Candidate>) {
         for m in self.re_trigger.find_iter(&doc.norm) {
-            // Захват до 100 символов до ближайшего ; \n , или даты.
-            let start = m.end();
-            let rest = &doc.norm[start..];
-            let mut end = start;
-            for (i, ch) in rest.char_indices() {
-                if matches!(ch, ';' | '\n' | ',') {
-                    end = start + i;
-                    break;
-                }
-                if i > 100 {
-                    end = start + i;
-                    break;
-                }
-            }
-            if end <= start {
+            let (lead, value) = capture_value(&doc.norm, m.end(), 100, false);
+            if value.is_empty() {
                 continue;
             }
-            let value = &doc.norm[start..end];
+            let start = m.end() + lead;
+            let end = start + value.len();
             // Внутри должен быть топоним.
             let has_toponym = ["г.", "город", "пос.", "с.", "дер.", "обл.", "край", "республика"]
                 .iter()
@@ -169,23 +207,15 @@ impl Detector for PassportIssuerDetector {
     }
     fn detect(&self, doc: &Document<'_>, _ctx: &DetectCtx, out: &mut Vec<Candidate>) {
         for m in self.re_trigger.find_iter(&doc.norm) {
-            let start = m.end();
-            let rest = &doc.norm[start..];
-            let mut end = start;
-            for (i, ch) in rest.char_indices() {
-                if matches!(ch, ';' | '\n' | '.') {
-                    end = start + i;
-                    break;
-                }
-                if i > 150 {
-                    end = start + i;
-                    break;
-                }
-            }
-            if end <= start {
+            // «выдан 15.03.2015 ОУФМС …»: дату между триггером и органом пропускаем
+            // до захвата значения — точка внутри даты иначе обрывает захват.
+            // Саму дату заберёт детектор дат как PASSPORT_ISSUE_DATE.
+            let after_trigger = m.end() + leading_date_len(&doc.norm[m.end()..]);
+            let (lead, value) = capture_value(&doc.norm, after_trigger, 150, true);
+            if value.is_empty() {
                 continue;
             }
-            let value = &doc.norm[start..end];
+            let start = after_trigger + lead;
             // Должен начинаться с аббревиатуры органа.
             let has_authority = self.authorities.iter().any(|a| value.starts_with(a.as_str()))
                 || ["уфмс", "оуфмс", "гу мвд", "умвд", "омвд", "овд", "мвд", "отделом", "отделением", "мц"]
@@ -194,6 +224,7 @@ impl Detector for PassportIssuerDetector {
             if !has_authority {
                 continue;
             }
+            let end = start + value.len();
             let span = doc.to_original(start, end);
             let mut cand = Candidate::new(
                 PdType::new(PdType::PASSPORT_ISSUER),
@@ -205,4 +236,23 @@ impl Detector for PassportIssuerDetector {
             out.push(cand);
         }
     }
+}
+/// Длина ведущей даты («15.03.2015 ») в байтах, иначе 0.
+fn leading_date_len(value: &str) -> usize {
+    let digits_dots: usize = value
+        .char_indices()
+        .take_while(|(_, c)| c.is_ascii_digit() || *c == '.' || *c == '-' || *c == '/')
+        .map(|(i, c)| i + c.len_utf8())
+        .last()
+        .unwrap_or(0);
+    if digits_dots == 0 || crate::service::detect::validators::parse_date(&value[..digits_dots]).is_none() {
+        return 0;
+    }
+    let ws: usize = value[digits_dots..]
+        .char_indices()
+        .take_while(|(_, c)| c.is_whitespace())
+        .map(|(i, c)| i + c.len_utf8())
+        .last()
+        .unwrap_or(0);
+    digits_dots + ws
 }

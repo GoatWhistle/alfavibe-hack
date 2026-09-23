@@ -3,6 +3,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+// PERF-08: глобальный аллокатор mimalloc для релизной сборки.
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use pd_guard::adapter::circuit_breaker::CircuitBreaker;
 use pd_guard::adapter::llm_client::{HttpLlmClient, UpstreamConfig};
 use pd_guard::adapter::ner_http::HttpNerEngine;
@@ -45,6 +50,20 @@ fn main() -> anyhow::Result<()> {
 
     let config_path = std::env::var("PDG_CONFIG").unwrap_or_else(|_| "config/config.yaml".into());
     let config_path = PathBuf::from(config_path);
+
+    // OPS-02: --check-config — валидация конфига без запуска сервиса (для CI).
+    if std::env::args().any(|a| a == "--check-config") {
+        match loader::load_from_file(&config_path) {
+            Ok(cfg) => {
+                println!("config OK (version {})", cfg.version);
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("config INVALID: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
 
     let cfg = loader::load_from_file(&config_path)?;
     let cfg = Arc::new(cfg);
@@ -94,6 +113,7 @@ fn main() -> anyhow::Result<()> {
     registry.register(Arc::new(DriverLicenseDetector::new()));
     registry.register(Arc::new(BirthPlaceDetector::new(cfg.cities.clone(), cfg.countries.clone())));
     registry.register(Arc::new(PassportIssuerDetector::new(cfg.issuing_authorities.clone())));
+    registry.register(Arc::new(pd_guard::service::detect::structured::StructuredFieldDetector::new()));
 
     // Конфиг-детекторы.
     for (t, tc) in &cfg.raw.pd_types {
@@ -157,10 +177,10 @@ fn main() -> anyhow::Result<()> {
         Arc::new(PublicPersonFilter {
             persons: cfg.public_persons.clone(),
         }),
-        Arc::new(BankAllowlistFilter {
-            offices: cfg.bank_offices.clone(),
-            phones: cfg.bank_phones.clone(),
-        }),
+        Arc::new(BankAllowlistFilter::new(
+            cfg.bank_offices.clone(),
+            cfg.bank_phones.clone(),
+        )),
         Arc::new(OrgContextFilter),
         Arc::new(NegativeNumberContext),
     ];
@@ -208,6 +228,7 @@ fn main() -> anyhow::Result<()> {
         combination,
         maskers_by_kind,
         default_masker: placeholder,
+        prefilter_regex_set: cfg.prefilter_regex_set.clone(),
     });
 
     // LlmClient.
@@ -243,6 +264,7 @@ fn main() -> anyhow::Result<()> {
         vault_mode: cfg.raw.vault.mode.clone(),
         ttl,
         delete_after_demask: cfg.raw.vault.delete_after_demask,
+        heavy_text_threshold_bytes: cfg.raw.server.heavy_text_threshold_bytes,
     });
 
     let resolver = Arc::new(PolicyResolver::new(cfg.clone()));
@@ -254,11 +276,13 @@ fn main() -> anyhow::Result<()> {
         resolver: resolver.clone(),
         token_counter,
         inflight: pd_guard::controller::middleware::InflightGuard::new(cfg.raw.server.max_inflight),
+        rate_limiter: Arc::new(pd_guard::infra::rate_limit::RateLimiter::new()),
     };
     let proxy = ProxyHandler {
         cfg: cfg.clone(),
         service: service.clone(),
         resolver: resolver.clone(),
+        rate_limiter: Arc::new(pd_guard::infra::rate_limit::RateLimiter::new()),
     };
     let vault_health: Arc<dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>> + Send + Sync> = {
         let vault = service.vault.clone();
@@ -290,15 +314,98 @@ fn main() -> anyhow::Result<()> {
         },
     };
 
+    let reload_for_watch = admin.reload.clone();
     let router = Arc::new(Router { process, proxy, admin });
 
     // Запуск.
+    // Recorder ставим до старта runtime: макросы metrics::* пишут в него сразу.
+    pd_guard::infra::metrics::install()?;
+
     let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async {
-        // Метрики (нужен tokio runtime).
-        let _ = pd_guard::infra::metrics::start_exporter(&cfg.raw.server.admin_listen);
+    let result = rt.block_on(async {
+        pd_guard::infra::metrics::spawn_upkeep();
+
+        // Служебный порт: метрики и перезагрузка конфига, отдельно от публичного.
+        {
+            let admin_listen = cfg.raw.server.admin_listen.clone();
+            let router = router.clone();
+            tokio::spawn(async move {
+                if let Err(e) = server::serve_kind(&admin_listen, router, true).await {
+                    tracing::error!(error = %e, "admin listener stopped");
+                }
+            });
+        }
+        // OPS-01: горячая перезагрузка конфига по изменению файла.
+        // Watcher живёт на отдельном потоке: он блокируется на recv(), а внутри
+        // tokio-задачи это намертво занимало бы воркер рантайма.
+        let reload = reload_for_watch;
+        let config_path = config_path.clone();
+        std::thread::Builder::new()
+            .name("config-watcher".into())
+            .spawn(move || watch_config(&config_path, reload))
+            .ok();
         server::run(&cfg.raw.server.listen, router).await
-    })
+    });
+
+    // Без явного завершения процесс висит после SIGTERM: фоновые задачи
+    // (watcher конфига, upkeep метрик, moka) не дают runtime закрыться.
+    // Даём долететь запросам, которые уже в обработке.
+    rt.shutdown_timeout(std::time::Duration::from_secs(2));
+    tracing::info!("stopped");
+    result
+}
+
+/// OPS-01: наблюдает за файлом конфига через notify и перезагружает при изменении.
+/// Блокирующий цикл наблюдения за файлом конфига. Запускается на своём потоке.
+fn watch_config(
+    config_path: &std::path::Path,
+    reload: Arc<dyn Fn() -> Result<(), String> + Send + Sync>,
+) {
+    use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut watcher: RecommendedWatcher = match notify::recommended_watcher(tx) {
+        Ok(w) => w,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to create config watcher");
+            return;
+        }
+    };
+    let watch_path = config_path.to_path_buf();
+    if let Err(e) = watcher.watch(&watch_path, RecursiveMode::NonRecursive) {
+        tracing::error!(error = %e, path = %watch_path.display(), "failed to watch config");
+        return;
+    }
+    tracing::info!(path = %watch_path.display(), "watching config for changes");
+    loop {
+        match rx.recv() {
+            Ok(Ok(notify::Event { kind, .. })) => {
+                let is_modify = matches!(
+                    kind,
+                    notify::EventKind::Modify(_) | notify::EventKind::Create(_)
+                );
+                if is_modify {
+                    // Небольшая задержка, чтобы файл успел записаться.
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                    match reload() {
+                        Ok(()) => {
+                            pd_guard::infra::metrics::set_config_version(1);
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "config reload on file change failed");
+                        }
+                    }
+                }
+            }
+            Ok(Err(e)) => {
+                tracing::error!(error = %e, "config watcher event error");
+            }
+            Err(e) => {
+                // Отправитель уничтожен — сервис завершается, поток тоже.
+                tracing::debug!(error = %e, "config watcher stopped");
+                return;
+            }
+        }
+    }
 }
 
 fn master_key_bytes(master: &pd_guard::infra::crypto::MasterKey) -> Vec<u8> {

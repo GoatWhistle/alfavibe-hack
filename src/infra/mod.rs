@@ -3,3 +3,4 @@
 pub mod crypto;
 pub mod logging;
 pub mod metrics;
+pub mod rate_limit;

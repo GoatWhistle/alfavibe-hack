@@ -54,6 +54,30 @@ impl RelevanceFilter for PublicPersonFilter {
 pub struct BankAllowlistFilter {
     pub offices: Vec<String>,
     pub phones: Vec<String>,
+    /// Адреса отделений, разобранные на слова один раз.
+    office_tokens: Vec<Vec<String>>,
+    /// Цифры телефонов банка, посчитанные один раз.
+    phone_digits: Vec<String>,
+}
+
+impl BankAllowlistFilter {
+    pub fn new(offices: Vec<String>, phones: Vec<String>) -> Self {
+        let office_tokens = offices
+            .iter()
+            .map(|o| normalize_for_compare(o).split_whitespace().map(str::to_string).collect())
+            .filter(|t: &Vec<String>| !t.is_empty())
+            .collect();
+        let phone_digits = phones
+            .iter()
+            .map(|p| p.chars().filter(|c| c.is_ascii_digit()).collect())
+            .collect();
+        Self {
+            offices,
+            phones,
+            office_tokens,
+            phone_digits,
+        }
+    }
 }
 
 impl RelevanceFilter for BankAllowlistFilter {
@@ -62,16 +86,45 @@ impl RelevanceFilter for BankAllowlistFilter {
     }
     fn keep(&self, doc: &Document<'_>, cand: &Candidate, _all: &[Candidate]) -> bool {
         let orig = doc.original_slice(cand.span);
-        let norm_orig = normalize_for_compare(orig);
-        if self.offices.iter().any(|o| norm_orig.contains(&normalize_for_compare(o))) {
+
+        // Адрес отделения может быть длиннее найденного компонента («ул. Тверская»
+        // против «москва ул тверская д 1»), поэтому сверяемся с окрестностью,
+        // а не только с самим кандидатом. Сравниваем последовательности слов, а не
+        // подстроки: иначе «д 1» из справочника совпадёт с «д 12» в тексте.
+        let around = normalize_for_compare(&window_original(doc, cand, 60, 60));
+        let tokens: Vec<&str> = around.split_whitespace().collect();
+        if self
+            .office_tokens
+            .iter()
+            .any(|office| contains_token_sequence(&tokens, office))
+        {
+            return false;
+        }
+
+        // Рядом сказано, что это отделение/офис банка — значит, не ПД клиента.
+        if matches!(
+            cand.pd_type.as_str(),
+            PdType::ADDRESS
+                | PdType::ADDR_CITY
+                | PdType::ADDR_STREET
+                | PdType::ADDR_HOUSE
+                | PdType::ADDR_FLAT
+                | PdType::ADDR_REGION
+                | PdType::ADDR_INDEX
+                | PdType::PHONE
+        ) && ["отделение банка", "офис банка", "филиал банка", "горячей линии", "горячая линия"]
+            .iter()
+            .any(|w| around.contains(w))
+        {
             return false;
         }
         if cand.pd_type.as_str() == PdType::PHONE {
             let digits: String = orig.chars().filter(|c| c.is_ascii_digit()).collect();
-            if self.phones.iter().any(|p| {
-                let pd: String = p.chars().filter(|c| c.is_ascii_digit()).collect();
-                !pd.is_empty() && digits.contains(&pd)
-            }) {
+            if self
+                .phone_digits
+                .iter()
+                .any(|pd| !pd.is_empty() && digits.contains(pd.as_str()))
+            {
                 return false;
             }
         }
@@ -79,13 +132,39 @@ impl RelevanceFilter for BankAllowlistFilter {
     }
 }
 
+/// Встречается ли последовательность слов `needle` подряд в `haystack`.
+fn contains_token_sequence(haystack: &[&str], needle: &[String]) -> bool {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return false;
+    }
+    haystack
+        .windows(needle.len())
+        .any(|w| w.iter().zip(needle).all(|(a, b)| *a == b.as_str()))
+}
+
+/// Окрестность кандидата в исходном тексте.
+fn window_original(doc: &Document<'_>, cand: &Candidate, left: usize, right: usize) -> String {
+    let text = doc.original;
+    let mut lo = cand.span.start.saturating_sub(left);
+    let mut hi = (cand.span.end + right).min(text.len());
+    while lo > 0 && !text.is_char_boundary(lo) {
+        lo -= 1;
+    }
+    while hi < text.len() && !text.is_char_boundary(hi) {
+        hi += 1;
+    }
+    text[lo..hi].to_string()
+}
+
+/// Приводит адрес к форме, в которой записан справочник отделений:
+/// нижний регистр, без пунктуации, одиночные пробелы.
 fn normalize_for_compare(s: &str) -> String {
-    s.to_lowercase()
-        .replace("ул.", "улица")
-        .replace("г.", "город")
+    let stripped: String = s
+        .to_lowercase()
         .chars()
-        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
-        .collect()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect();
+    stripped.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// Фильтр негативного контекста чисел (заказ/договор/сумма).

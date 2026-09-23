@@ -15,6 +15,7 @@ pub mod inn;
 pub mod passport;
 pub mod phone;
 pub mod snils;
+pub mod structured;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -26,7 +27,7 @@ use crate::domain::entity::{Candidate, DetectorSource, SignalFlags};
 use crate::domain::pd_type::PdType;
 use crate::domain::traits::{DetectCtx, Detector, ValidationResult};
 
-use crate::service::detect::context::{is_boundary, window};
+use crate::service::detect::context::{has_any_word, is_boundary, window};
 
 /// Реестр детекторов.
 #[derive(Default)]
@@ -146,11 +147,11 @@ impl Detector for ConfigRegexDetector {
 
             // Контекст.
             let window = window(doc, m.start().saturating_sub(60), m.end() + 20);
-            if self.context_pos.iter().any(|w| window.contains(w.as_str())) {
+            if has_any_word(window, &self.context_pos.iter().map(|s| s.as_str()).collect::<Vec<_>>()) {
                 cand.score = (cand.score + 0.35).min(1.0_f32);
                 cand.signals |= SignalFlags::CONTEXT_POS;
             }
-            if self.context_neg.iter().any(|w| window.contains(w.as_str())) {
+            if has_any_word(window, &self.context_neg.iter().map(|s| s.as_str()).collect::<Vec<_>>()) {
                 cand.score = (cand.score - 0.5).max(0.0_f32);
                 cand.signals |= SignalFlags::CONTEXT_NEG;
             }

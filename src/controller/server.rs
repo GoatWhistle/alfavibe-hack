@@ -10,11 +10,11 @@ use tokio::net::TcpListener;
 
 use super::router::Router;
 
-/// Запускает HTTP-сервер.
-pub async fn serve(listen: &str, router: Arc<Router>) -> anyhow::Result<()> {
+/// Запускает HTTP-сервер. `admin = true` — служебные маршруты (метрики, reload).
+pub async fn serve_kind(listen: &str, router: Arc<Router>, admin: bool) -> anyhow::Result<()> {
     let addr: SocketAddr = listen.parse()?;
     let listener = TcpListener::bind(addr).await?;
-    tracing::info!(%addr, "listening");
+    tracing::info!(%addr, kind = if admin { "admin" } else { "public" }, "listening");
 
     loop {
         let (stream, _) = listener.accept().await?;
@@ -24,7 +24,11 @@ pub async fn serve(listen: &str, router: Arc<Router>) -> anyhow::Result<()> {
             let service = service_fn(move |req| {
                 let router = router.clone();
                 async move {
-                    let resp = router.route(req).await;
+                    let resp = if admin {
+                        router.route_admin(req).await
+                    } else {
+                        router.route(req).await
+                    };
                     let (parts, body) = resp.into_parts();
                     let full = http_body_util::Full::new(body);
                     Ok::<_, std::convert::Infallible>(http::Response::from_parts(parts, full))
@@ -38,9 +42,14 @@ pub async fn serve(listen: &str, router: Arc<Router>) -> anyhow::Result<()> {
     }
 }
 
+/// Публичный сервер (совместимость со старым именем).
+pub async fn serve(listen: &str, router: Arc<Router>) -> anyhow::Result<()> {
+    serve_kind(listen, router, false).await
+}
+
 /// Запускает сервер и ждёт сигнала завершения.
 pub async fn run(listen: &str, router: Arc<Router>) -> anyhow::Result<()> {
-    let server = serve(listen, router);
+    let server = serve_kind(listen, router, false);
     tokio::select! {
         r = server => r,
         _ = shutdown_signal() => {

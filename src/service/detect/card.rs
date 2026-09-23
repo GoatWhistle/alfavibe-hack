@@ -187,7 +187,12 @@ impl Default for CardHolderDetector {
 impl CardHolderDetector {
     pub fn new() -> Self {
         Self {
-            re: Regex::new(r"(держатель карты|имя держателя|cardholder|card holder|имя на карте)\D{0,40}?([a-zа-я]{2,}(?:\s+[a-zа-я]{2,}){0,2})").unwrap(),
+            // Триггеры: «держатель карты», «держатель», «на имя», cardholder и т.п.
+            // Текст нормализован в нижний регистр, поэтому латиница ищется как [a-z].
+            re: Regex::new(
+                r"(держател[ьяем]{1,2}|имя\s+держателя|имя\s+на\s+карте|на\s+имя|cardholder(?:\s+name)?|card\s+holder|name\s+on\s+card)(?:\s+карт[ыеу])?\s*:?\s*([a-zа-яё]{2,}(?:\s+[a-zа-яё]{2,}){0,2})",
+            )
+            .unwrap(),
             types: vec![PdType::new(PdType::CARD_HOLDER)],
         }
     }

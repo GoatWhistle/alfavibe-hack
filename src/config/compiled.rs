@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use aho_corasick::AhoCorasick;
-use regex::Regex;
+use regex::{Regex, RegexSet};
 
 use crate::domain::pd_type::PdType;
 use crate::domain::traits::EffectivePolicy;
@@ -25,6 +25,8 @@ pub struct CompiledConfig {
     pub detector_context: HashMap<PdType, (Vec<String>, Vec<String>)>,
     /// Общий AhoCorasick по всем контекстным словам (для префильтра).
     pub context_ac: Option<AhoCorasick>,
+    /// PERF-11: RegexSet по всем паттернам конфиг-детекторов (для префильтра).
+    pub prefilter_regex_set: Option<RegexSet>,
     /// Словари.
     pub first_names: Vec<String>,
     pub public_persons: Vec<Vec<String>>,
@@ -47,6 +49,8 @@ pub struct CompiledConfig {
     pub admin_token_sha256: String,
     /// SHA-256 ключей систем.
     pub system_keys: HashMap<String, String>,
+    /// SHA-256 ключей систем как сырые 32 байта (PERF-06).
+    pub system_key_bytes: HashMap<String, [u8; 32]>,
     /// Включённость систем.
     pub system_enabled: HashMap<String, bool>,
     /// Профиль системы.

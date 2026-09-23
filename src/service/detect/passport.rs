@@ -7,7 +7,7 @@ use crate::domain::entity::{Candidate, DetectorSource, SignalFlags};
 use crate::domain::pd_type::PdType;
 use crate::domain::traits::{DetectCtx, Detector, ValidationResult, Validator};
 
-use super::context::{is_boundary, window};
+use super::context::{has_any_prefix, has_any_word, is_boundary, window};
 use super::validators::PassportSeriesValidator;
 
 pub struct PassportDetector {
@@ -64,9 +64,10 @@ impl Detector for PassportDetector {
             );
 
             let window = window(doc, m.start().saturating_sub(60), m.end() + 20);
-            let has_context = ["паспорт", "серия", "паспортные данные", "удостоверение личности", "документ"]
-                .iter()
-                .any(|w| window.contains(w));
+            let has_context = has_any_prefix(
+                window,
+                &["паспорт", "сери", "удостоверен", "документ"],
+            );
 
             match self.series_validator.validate(&series) {
                 ValidationResult::Valid => {
@@ -134,9 +135,7 @@ impl Detector for DivisionCodeDetector {
             }
             let span = doc.to_original(m.start(), m.end());
             let window = window(doc, m.start().saturating_sub(60), m.end() + 20);
-            let has_context = ["код подразделения", "к/п", "код подр"]
-                .iter()
-                .any(|w| window.contains(w));
+            let has_context = has_any_prefix(window, &["подразделен", "подр"]) && has_any_word(window, &["код"]);
             let score = if has_context { 0.95 } else { 0.3 };
             let mut cand = Candidate::new(
                 PdType::new(PdType::DIVISION_CODE),

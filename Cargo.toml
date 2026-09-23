@@ -13,6 +13,11 @@ path = "src/lib.rs"
 name = "pd-guard"
 path = "src/main.rs"
 
+# Нагрузочный генератор (методика Приложения B ТЗ).
+[[bin]]
+name = "loadgen"
+path = "tools/loadgen/main.rs"
+
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time", "fs", "net"] }
 hyper = { version = "1", features = ["http1", "http2", "server", "client"] }
@@ -66,7 +71,7 @@ criterion = "0.5"
 tempfile = "3"
 
 [features]
-default = []
+default = ["mimalloc"]
 redis = ["dep:fred"]
 ner-onnx = []
 mimalloc = ["dep:mimalloc"]

@@ -34,25 +34,31 @@ impl Span {
 /// Документ с нормализованным текстом и картой смещений norm → original.
 pub struct Document<'a> {
     pub original: &'a str,
-    pub norm: String,
+    /// PERF-16: для ASCII-текста нормализация заимствуется (Cow::Borrowed).
+    pub norm: std::borrow::Cow<'a, str>,
     norm_to_orig: Vec<u32>,
 }
 
 impl<'a> Document<'a> {
     pub fn new(original: &'a str) -> Self {
+        // PERF-16: быстрый путь — если текст не требует свёртки, заимствуем.
+        if is_ascii_fast_path(original) {
+            return Document {
+                original,
+                norm: std::borrow::Cow::Borrowed(original),
+                norm_to_orig: Vec::new(),
+            };
+        }
+
         let mut norm = String::with_capacity(original.len());
         let mut norm_to_orig: Vec<u32> = Vec::with_capacity(original.len() + 1);
 
+        // PERF-14: пишем символы напрямую в преаллоцированную строку,
+        // без промежуточных String на каждый символ (nfkc/to_lowercase — итераторы).
         for (orig_byte, ch) in original.char_indices() {
-            // 1. NFKC
-            let nfkc: String = ch.nfkc().collect();
-            for nc in nfkc.chars() {
-                // 2. lowercase
-                let lower: String = nc.to_lowercase().collect();
-                for lc in lower.chars() {
-                    let mapped = normalize_char(lc);
-                    for mc in mapped.chars() {
-                        // Записываем orig_byte для каждого байта norm.
+            for nc in ch.nfkc() {
+                for lc in nc.to_lowercase() {
+                    for mc in normalize_char(lc).chars() {
                         let mut buf = [0u8; 4];
                         let s = mc.encode_utf8(&mut buf);
                         for _ in 0..s.len() {
@@ -68,13 +74,17 @@ impl<'a> Document<'a> {
 
         Document {
             original,
-            norm,
+            norm: std::borrow::Cow::Owned(norm),
             norm_to_orig,
         }
     }
 
     /// Перевод диапазона norm → original. Результат на границах символов.
     pub fn to_original(&self, norm_start: usize, norm_end: usize) -> Span {
+        // PERF-16: для ASCII-текста карта тождественна.
+        if self.norm_to_orig.is_empty() {
+            return Span::new(norm_start, norm_end);
+        }
         let ns = norm_start.min(self.norm.len());
         let ne = norm_end.min(self.norm.len());
         let start = self.norm_to_orig[ns] as usize;
@@ -102,16 +112,22 @@ impl<'a> Document<'a> {
     }
 }
 
+/// PERF-16: проверяет, что текст не требует свёртки (чистый ASCII без заглавных).
+fn is_ascii_fast_path(text: &str) -> bool {
+    text.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b.is_ascii_punctuation() || b == b' ')
+}
+
 /// Посимвольная нормализация (после NFKC и lowercase).
-fn normalize_char(c: char) -> String {
+/// Возвращает Cow, чтобы не аллоцировать для обычных символов (PERF-14).
+fn normalize_char(c: char) -> std::borrow::Cow<'static, str> {
     match c {
-        'ё' => "е".to_string(),
-        '‐' | '‑' | '‒' | '–' | '—' | '―' | '−' => "-".to_string(),
+        'ё' => "е".into(),
+        '‐' | '‑' | '‒' | '–' | '—' | '―' | '−' => "-".into(),
         '\u{00a0}' | '\u{2009}' | '\t' | '\u{2000}' | '\u{2001}' | '\u{2002}' | '\u{2003}'
         | '\u{2004}' | '\u{2005}' | '\u{2006}' | '\u{2007}' | '\u{2008}' | '\u{200a}'
-        | '\u{202f}' | '\u{205f}' | '\u{3000}' => " ".to_string(),
-        '«' | '»' | '„' | '“' | '”' => "\"".to_string(),
-        _ => c.to_string(),
+        | '\u{202f}' | '\u{205f}' | '\u{3000}' => " ".into(),
+        '«' | '»' | '„' | '“' | '”' => "\"".into(),
+        _ => c.to_string().into(),
     }
 }
 

@@ -60,8 +60,16 @@ impl AdminHandler {
             .and_then(|v| v.strip_prefix("Bearer "))
             .unwrap_or("");
         let expected = &self.cfg.admin_token_sha256;
+        // Fail closed: не настроен токен — ручка недоступна, а не открыта всем.
+        if expected.is_empty() {
+            tracing::warn!("config reload rejected: security.admin_token_sha256 не задан");
+            return Response::builder()
+                .status(StatusCode::UNAUTHORIZED)
+                .body(Bytes::from("admin token not configured"))
+                .unwrap();
+        }
         let token_hash = crate::infra::crypto::sha256_hex(token.as_bytes());
-        if !expected.is_empty() && token_hash != *expected {
+        if token_hash != *expected {
             return Response::builder()
                 .status(StatusCode::UNAUTHORIZED)
                 .body(Bytes::from("unauthorized"))

@@ -5,9 +5,19 @@ use std::collections::HashMap;
 use regex::Regex;
 
 /// Соответствие «маска → оригинал» для сессии.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+///
+/// Кроме пар «маска → значение» хранит сам исходный и замаскированный тексты:
+/// контракт Приложения A коррелирует запросы по `payload_id`, и по повторному
+/// обращению нужно отличить ретрай прямого шага от обратного шага.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct Mapping {
     pub entries: Vec<MappingEntry>,
+    /// Исходный текст запроса (пусто, если не сохранялся).
+    #[serde(default)]
+    pub original: String,
+    /// Текст после маскирования.
+    #[serde(default)]
+    pub masked: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -73,13 +83,16 @@ pub fn demask(text: &str, mapping: &Mapping) -> DemaskResult {
     }
     out.push_str(&text[last..]);
 
-    // Поиск по частично замаскированным значениям.
+    // Поиск по частично замаскированным значениям (partial/redact).
+    // Одинаковые маски («***» у нескольких CVV) неразличимы по содержимому,
+    // поэтому заменяем строго по одному вхождению на запись и в порядке записей —
+    // так повторы восстанавливаются в том же порядке, в каком маскировались.
+    let mut search_from = 0usize;
     for (masked, orig) in by_masked {
         if masked.is_empty() {
             continue;
         }
-        let mut search_from = 0;
-        while let Some(pos) = out[search_from..].find(masked) {
+        if let Some(pos) = out[search_from..].find(masked) {
             let abs = search_from + pos;
             out.replace_range(abs..abs + masked.len(), orig);
             restored += 1;
@@ -107,6 +120,7 @@ mod tests {
                 original: "Иванов Иван Иванович".into(),
                 masked: None,
             }],
+            ..Default::default()
         };
         let res = demask("Клиент [ФИО_1] живёт", &mapping);
         assert_eq!(res.text, "Клиент Иванов Иван Иванович живёт");
@@ -123,6 +137,7 @@ mod tests {
                 original: "Иванов".into(),
                 masked: None,
             }],
+            ..Default::default()
         };
         // LLM исказил скобки
         let res = demask("Клиент ФИО_1", &mapping);

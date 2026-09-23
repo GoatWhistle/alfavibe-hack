@@ -7,7 +7,7 @@ use crate::domain::entity::{Candidate, DetectorSource, SignalFlags};
 use crate::domain::pd_type::PdType;
 use crate::domain::traits::{DetectCtx, Detector};
 
-use super::context::{is_boundary, window};
+use super::context::{has_any_word, is_boundary, window};
 
 pub struct PhoneDetector {
     re_rf: Regex,
@@ -54,9 +54,10 @@ impl Detector for PhoneDetector {
             }
             let span = doc.to_original(m.start(), m.end());
             let window = window(doc, m.start().saturating_sub(60), m.end() + 20);
-            let has_context = ["тел", "телефон", "моб", "звоните", "whatsapp", "telegram", "phone"]
-                .iter()
-                .any(|w| window.contains(w));
+            let has_context = has_any_word(
+                window,
+                &["тел", "телефон", "моб", "звоните", "whatsapp", "telegram", "phone"],
+            );
             let mut cand = Candidate::new(
                 PdType::new(PdType::PHONE),
                 span,

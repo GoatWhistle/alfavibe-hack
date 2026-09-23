@@ -7,7 +7,7 @@ use crate::domain::entity::{Candidate, DetectorSource, SignalFlags};
 use crate::domain::pd_type::PdType;
 use crate::domain::traits::{DetectCtx, Detector};
 
-use super::context::{is_boundary, window};
+use super::context::{has_any_prefix, is_boundary, window};
 use super::numwords::parse_numeral_words;
 use super::validators::parse_date;
 
@@ -43,7 +43,13 @@ impl DateDetector {
         Self {
             re_numeric: Regex::new(r"\d{1,4}[./-]\d{1,2}[./-]\d{1,4}").unwrap(),
             re_text: Regex::new(r"(\d{1,2})\s+([а-яa-z]+)\s+(\d{4})(\s*г(ода?)?\.?)?").unwrap(),
-            types: vec![PdType::new(PdType::DATE)],
+            // classify_date относит находку к BIRTH_DATE/PASSPORT_ISSUE_DATE/DATE,
+            // поэтому объявляем все три: конвейер отбирает детекторы по types().
+            types: vec![
+                PdType::new(PdType::DATE),
+                PdType::new(PdType::BIRTH_DATE),
+                PdType::new(PdType::PASSPORT_ISSUE_DATE),
+            ],
         }
     }
 }
@@ -100,12 +106,9 @@ fn classify_date(
     base_score: f32,
 ) -> Candidate {
     let window = window(doc, norm_start.saturating_sub(60), norm_end + 20);
-    let birth = ["дата рождения", "д.р.", "д/р", "г.р.", "родил", "рожден", "date of birth", "dob"]
-        .iter()
-        .any(|w| window.contains(w));
-    let issue = ["дата выдачи", "выдан", "когда выдан"]
-        .iter()
-        .any(|w| window.contains(w));
+    // Основы, а не целые слова: в тексте стоят «родился», «рождения», «выданного».
+    let birth = has_any_prefix(window, &["рожден", "родил", "рождён", "dob", "birth"]);
+    let issue = has_any_prefix(window, &["выдач", "выдан", "issue"]);
 
     let pd_type = if birth {
         PdType::new(PdType::BIRTH_DATE)
@@ -143,7 +146,11 @@ impl NumeralDateDetector {
     pub fn new() -> Self {
         Self {
             re: Regex::new(r"[а-яё]+(?:\s+[а-яё]+){0,6}\s+(января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)(?:\s+[а-яё]+){0,6}").unwrap(),
-            types: vec![PdType::new(PdType::DATE)],
+            types: vec![
+                PdType::new(PdType::DATE),
+                PdType::new(PdType::BIRTH_DATE),
+                PdType::new(PdType::PASSPORT_ISSUE_DATE),
+            ],
         }
     }
 }

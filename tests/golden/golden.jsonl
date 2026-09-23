@@ -1,0 +1,35 @@
+# Золотой набор: категории ПД из п. 4.1 ТЗ + негативные примеры.
+# Границы — байтовые смещения. Пересобирается из tests/golden/texts.txt,
+# значения выверены вручную.
+{"text": "Клиент Иванов Иван Иванович обратился за выпиской", "entities": [{"type": "FIO", "start": 13, "end": 51}]}
+{"text": "ПЕТРОВА АННА СЕРГЕЕВНА, менеджер отделения", "entities": [{"type": "FIO", "start": 0, "end": 42}]}
+{"text": "Дата рождения 31.12.1990, анкета заполнена полностью", "entities": [{"type": "BIRTH_DATE", "start": 26, "end": 36}]}
+{"text": "Клиент родился 05 марта 1985 года", "entities": [{"type": "BIRTH_DATE", "start": 28, "end": 55}]}
+{"text": "Дата рождения 12.31.1990 по данным анкеты", "entities": [{"type": "BIRTH_DATE", "start": 26, "end": 36}]}
+{"text": "Место рождения г. Казань", "entities": [{"type": "BIRTH_PLACE", "start": 28, "end": 44}]}
+{"text": "Уроженец с. Никольское Воронежской обл., проживает в Москве", "entities": [{"type": "BIRTH_PLACE", "start": 17, "end": 72}]}
+{"text": "Паспорт 4509 123456 предъявлен при открытии счёта", "entities": [{"type": "PASSPORT", "start": 15, "end": 26}]}
+{"text": "Паспорт серия 4509 номер 123456 выдан ОУФМС России по гор. Москве, код подразделения 770-053", "entities": [{"type": "PASSPORT", "start": 15, "end": 48}, {"type": "PASSPORT_ISSUER", "start": 60, "end": 109}, {"type": "DIVISION_CODE", "start": 145, "end": 152}]}
+{"text": "Гражданство Российская Федерация, резидент", "entities": [{"type": "CITIZENSHIP", "start": 23, "end": 62}]}
+{"text": "Кем выдан: ГУ МВД России по Московской области", "entities": [{"type": "PASSPORT_ISSUER", "start": 19, "end": 84}]}
+{"text": "Код подразделения 770-053 совпадает с анкетой", "entities": [{"type": "DIVISION_CODE", "start": 34, "end": 41}]}
+{"text": "Водительское удостоверение 77 АА 123456 действительно", "entities": [{"type": "DRIVER_LICENSE", "start": 52, "end": 66}]}
+{"text": "Адрес регистрации: 123456, Россия, г. Москва, ул. Ленина, д. 5, кв. 10", "entities": [{"type": "ADDR_CITY", "start": 57, "end": 73}, {"type": "ADDR_STREET", "start": 75, "end": 93}, {"type": "ADDR_HOUSE", "start": 95, "end": 100}, {"type": "ADDR_FLAT", "start": 102, "end": 110}]}
+{"text": "Почта для уведомлений ivanov.ivan@mail.ru", "entities": [{"type": "EMAIL", "start": 41, "end": 60}]}
+{"text": "Телефон +7 912 345-67-89, звонить после 18:00", "entities": [{"type": "PHONE", "start": 15, "end": 31}]}
+{"text": "ИНН 500100732259 указан в уведомлении", "entities": [{"type": "INN", "start": 7, "end": 19}]}
+{"text": "СНИЛС 112-233-445 95 подтверждён выпиской", "entities": [{"type": "SNILS", "start": 11, "end": 25}]}
+{"text": "Карта 4532 0151 1283 0366 заблокирована по заявлению", "entities": [{"type": "CARD_NUMBER", "start": 11, "end": 30}]}
+{"text": "Карта 4532015112830366, срок 09/27, cvv 123", "entities": [{"type": "CARD_NUMBER", "start": 11, "end": 27}, {"type": "CVV", "start": 49, "end": 52}]}
+{"text": "Клиент трижды ввёл неверный пин-код 4321 по карте 4532015112830366", "entities": [{"type": "PIN", "start": 66, "end": 70}, {"type": "CARD_NUMBER", "start": 87, "end": 103}]}
+{"text": "Имя держателя карты IVAN IVANOV", "entities": [{"type": "CARD_HOLDER", "start": 37, "end": 48}]}
+{"text": "Памятник Александру Сергеевичу Пушкину установлен на Пушкинской площади", "entities": []}
+{"text": "Отделение банка на ул. Тверская, д. 1, телефон горячей линии 8 800 200-00-00", "entities": []}
+{"text": "Договор № 4509123456 от 10.01.2024 на сумму 250000 руб., счёт-фактура 7707083893", "entities": []}
+{"text": "Какие документы нужны для оформления ипотеки на вторичное жильё", "entities": []}
+{"text": "Паспорт 4509 123456 выдан 15.03.2015 ОУФМС России по гор. Москве", "entities": [{"type": "PASSPORT", "start": 15, "end": 26}, {"type": "PASSPORT_ISSUE_DATE", "start": 38, "end": 48}, {"type": "PASSPORT_ISSUER", "start": 49, "end": 98}]}
+{"text": "Индекс 191186, Санкт-Петербург, Невский проспект, дом 28, квартира 145", "entities": [{"type": "ADDR_INDEX", "start": 13, "end": 19}, {"type": "ADDR_HOUSE", "start": 85, "end": 94}, {"type": "ADDR_FLAT", "start": 96, "end": 116}]}
+{"text": "Отправьте выписку на A.Petrova@Example.COM и подтвердите", "entities": [{"type": "EMAIL", "start": 39, "end": 60}]}
+{"text": "Контактный номер 8 (495) 987-65-43, добавочный 200", "entities": [{"type": "PHONE", "start": 32, "end": 49}]}
+{"text": "Клиент Кузнецов Михаил Петрович, гражданство РФ, ИНН 500100732259, карта 4276550012345677", "entities": [{"type": "FIO", "start": 13, "end": 59}, {"type": "CITIZENSHIP", "start": 84, "end": 88}, {"type": "INN", "start": 97, "end": 109}, {"type": "CARD_NUMBER", "start": 122, "end": 138}]}
+{"text": "Подскажите ставку по накопительному счёту", "entities": []}

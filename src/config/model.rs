@@ -96,6 +96,11 @@ pub struct SecurityConfig {
     pub auth_header: String,
     #[serde(default = "default_system_id_header")]
     pub system_id_header: String,
+    /// Система, от имени которой обслуживаются запросы без заголовков
+    /// аутентификации. Нужна для контракта Приложения A: проверяющая система
+    /// шлёт POST /process без учётных данных. Пусто — анонимный доступ закрыт.
+    #[serde(default)]
+    pub default_system_id: String,
 }
 
 fn default_auth_header() -> String {
@@ -112,6 +117,7 @@ impl Default for SecurityConfig {
             admin_token_sha256: String::new(),
             auth_header: default_auth_header(),
             system_id_header: default_system_id_header(),
+            default_system_id: String::new(),
         }
     }
 }

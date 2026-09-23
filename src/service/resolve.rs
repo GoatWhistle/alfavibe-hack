@@ -22,29 +22,26 @@ impl Resolver for DefaultResolver {
         // 2. Сортировка по start.
         cands.sort_by(|a, b| a.span.start.cmp(&b.span.start));
 
-        // 3. Разрешение пересечений.
+        // 3. Разрешение пересечений (PERF-17: свип по отсортированным кандидатам).
+        //    Кандидаты отсортированы по start; выбранные не пересекаются, поэтому
+        //    новый кандидат может пересекаться только с последним выбранным.
         let mut selected: Vec<Candidate> = Vec::new();
         for cand in cands {
-            let mut absorbed = false;
-            for sel in selected.iter_mut() {
-                if sel.span.overlaps(&cand.span) {
+            if let Some(last) = selected.last_mut() {
+                if last.span.overlaps(&cand.span) {
                     // Составная сущность поглощает компоненты.
-                    if sel.pd_type.as_str() == PdType::ADDRESS
-                        && cand.components.iter().any(|c| c.span.overlaps(&sel.span))
+                    if last.pd_type.as_str() == PdType::ADDRESS
+                        && cand.components.iter().any(|c| c.span.overlaps(&last.span))
                     {
-                        absorbed = true;
-                        break;
+                        continue;
                     }
-                    if a_wins(&cand, sel, policy) {
-                        *sel = cand.clone();
+                    if a_wins(&cand, last, policy) {
+                        *last = cand;
                     }
-                    absorbed = true;
-                    break;
+                    continue;
                 }
             }
-            if !absorbed {
-                selected.push(cand);
-            }
+            selected.push(cand);
         }
 
         // 4. Преобразование в Entity.

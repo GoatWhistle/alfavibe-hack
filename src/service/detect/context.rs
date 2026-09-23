@@ -57,6 +57,28 @@ pub fn has_context_word(
     words.iter().any(|w| window.contains(w))
 }
 
+/// Проверяет, есть ли слово в тексте как отдельное слово (с границами слов).
+/// DET-04: `contains("ип")` не должен срабатывать на «тип»/«принцип».
+pub fn has_word(text: &str, word: &str) -> bool {
+    text.split(|c: char| !c.is_alphanumeric())
+        .any(|w| w == word)
+}
+
+/// Проверяет, есть ли хотя бы одно из слов как отдельное слово.
+pub fn has_any_word(text: &str, words: &[&str]) -> bool {
+    words.iter().any(|w| has_word(text, w))
+}
+
+/// Проверяет, начинается ли какое-нибудь слово текста с одной из основ.
+///
+/// Нужна там, где в списке контекста стоят основы («водительск», «родил»):
+/// точное сравнение их никогда не находит, потому что в тексте стоят
+/// «водительское» и «родился».
+pub fn has_any_prefix(text: &str, prefixes: &[&str]) -> bool {
+    text.split(|c: char| !c.is_alphanumeric())
+        .any(|word| !word.is_empty() && prefixes.iter().any(|p| word.starts_with(p)))
+}
+
 /// Контекстный скоринг по списку позитивных/негативных слов.
 pub struct KeywordContextScorer {
     pub id: String,
